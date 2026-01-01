@@ -159,6 +159,5 @@ Each worksheet corresponds to an **Activity** and contains:
 ---
 
 ## License / Usage
-Add your preferred license for the repository (MIT is common for code sharing).  
-If sharing publicly, **do not upload human-subject raw data**—only scripts/notebooks and (optionally) small synthetic/example CSVs.
+MIT licence
 
