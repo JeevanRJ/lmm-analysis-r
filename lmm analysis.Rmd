@@ -1,0 +1,457 @@
+# Select path as needed for CF or SD
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(RColorBrewer)
+library(ggforce)
+library(lubridate)
+library(gridExtra)
+library(readxl)
+library(patchwork)
+library(gridExtra)
+library(ggplotify)
+library(readr)
+library(tools)  # for file_path_sans_ext
+library(lme4)
+library(glmmTMB)
+library(lmerTest)
+library(afex)
+library(openxlsx)
+library(emmeans)
+```
+
+
+# set inputs for CF
+```{r}
+input_folder <- "C:/Users/jayasuriyaar/OneDrive - UW-Madison/NASA-nVIBE/Publications/Pub3_Interaction Effects of GVS and Fatigue on SM tasks/Data/CF"
+
+fatigue_levels = c("pr", "po")
+
+sleep_data_dir <- "C:/Users/jayasuriyaar/OneDrive - UW-Madison/Research/NASA Full Data Analysis_postDC/CF/Data Files/Sleep Detection Data/Sleep Data"
+
+# Define male and female subjects (as character strings like "S1", "S2", ...)
+male_subjects <- c("S1", "S2", "S4", "S8", "S9", "S11", "S13", "S16", "S18", "S22", "S23", "S24")
+female_subjects <- c("S3", "S5", "S6", "S7", "S10", "S12", "S14", "S15", "S17", "S19", "S20", "S21")
+
+Fatigue_type <- "CF"
+set_val = 10
+```
+
+
+# set inputs for SD
+```{r}
+input_folder <- "C:/Users/jayasuriyaar/OneDrive - UW-Madison/NASA-nVIBE/Publications/Pub3_Interaction Effects of GVS and Fatigue on SM tasks/Data/SD"
+#fatigue_levels = c("6pm", "2am", "6am", "10am")
+fatigue_levels = c("6pm", "10am")
+
+sleep_data_dir <- "C:/Users/jayasuriyaar/OneDrive - UW-Madison/Research/NASA Full Data Analysis_postDC/SD/Data Files/Sleep Data"
+
+# Define male and female subjects (as character strings like "S1", "S2", ...)
+male_subjects <- c("S1", "S4", "S5", "S6", "S7", "S10", "S11", "S15", "S18", "S19", "S20", "S21" )
+female_subjects <- c("S2", "S3", "S8", "S9", "S12", "S13", "S14", "S16", "S17", "S22", "S23", "S24")
+
+Fatigue_type <- "SD"
+set_val = 20
+```
+
+
+
+# Stat function for TW and FP and TLX (within activity comparisions)
+```{r}
+
+run_fatigue_gvs_analysis <- function(df, 
+                                     apply_log_transform = TRUE, 
+                                     use_glmm = FALSE,
+                                     separate_by_gender = FALSE,
+                                     package_choice = "lmerTest", # Options: "lmerTest", "afex"
+                                     output_excel_base = "fatigue_gvs_stats_summary") {
+  process_one_group <- function(sub_df, group_label) {
+    results_list <- list()
+
+    for (activity in unique(sub_df$Activity)) {
+      df_activity <- sub_df %>% filter(Activity == activity)
+
+      normality_before <- df_activity %>% 
+        group_by(Fatigue, Stimulation) %>% 
+        summarise(p_value = shapiro.test(Value)$p.value, .groups = "drop")
+
+      if (apply_log_transform) {
+        df_activity <- df_activity %>% mutate(Value = log(Value + 1e-6))
+      }
+
+      normality_after <- df_activity %>% 
+        group_by(Fatigue, Stimulation) %>% 
+        summarise(p_value = shapiro.test(Value)$p.value, .groups = "drop")
+
+      if (use_glmm) {
+        model <- glmmTMB(Value ~ Fatigue * Stimulation + (1 | Subject),
+                         family = Gamma(link = "log"),
+                         data = df_activity)
+        model_anova <- anova(model) %>% as.data.frame()
+        model_anova$Effect <- rownames(anova(model))
+        rownames(model_anova) <- NULL
+        model_anova <- model_anova %>% select(Effect, everything())
+        pairwise_results <- NULL
+      } else if (package_choice == "lmerTest") {
+        model <- lmer(Value ~ Fatigue * Stimulation + (1 | Subject), data = df_activity)
+        model_anova <- as.data.frame(anova(model, type = 3))
+        model_anova$Effect <- rownames(model_anova)
+        rownames(model_anova) <- NULL
+        model_anova <- model_anova %>% select(Effect, everything())
+        pairwise_results <- as.data.frame(emmeans::emmeans(model, pairwise ~ Fatigue * Stimulation)$contrasts)
+      } else if (package_choice == "afex") {
+        model_afex <- afex::mixed(
+          Value ~ Fatigue * Stimulation + (1 | Subject),
+          data = df_activity,
+          method = "S",
+          type = 3,
+          return = "afex_aov"
+        )
+        model_anova <- as.data.frame(model_afex$anova_table)
+        model_anova$Effect <- rownames(model_afex$anova_table)
+        model_anova <- model_anova %>% select(Effect, everything())
+        rownames(model_anova) <- NULL
+        model <- model_afex$full_model
+        pairwise_results <- as.data.frame(emmeans::emmeans(model, pairwise ~ Fatigue * Stimulation)$contrasts)
+      } else {
+        stop("Invalid package_choice. Use 'lmerTest' or 'afex'.")
+      }
+
+      model_summary <- as.data.frame(summary(model)$coefficients)
+
+      results_list[[as.character(activity)]] <- list(
+        normality_before = normality_before,
+        normality_after = normality_after,
+        model_anova = model_anova,
+        model_summary = model_summary,
+        pairwise_results = pairwise_results
+      )
+    }
+
+    wb <- createWorkbook()
+    for (activity in names(results_list)) {
+      addWorksheet(wb, paste0(activity, "_Summary"))
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                x = "Results of Main and Interaction Effects (ANOVA Table)", startRow = 1)
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                results_list[[activity]]$model_anova, startRow = 2)
+
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                x = "Model Coefficients", startRow = nrow(results_list[[activity]]$model_anova) + 4)
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                results_list[[activity]]$model_summary, startRow = nrow(results_list[[activity]]$model_anova) + 5)
+
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                x = "Results of Normality Test Before Log Transformation", 
+                startRow = nrow(results_list[[activity]]$model_anova) + nrow(results_list[[activity]]$model_summary) + 7)
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                results_list[[activity]]$normality_before, 
+                startRow = nrow(results_list[[activity]]$model_anova) + nrow(results_list[[activity]]$model_summary) + 8)
+
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                x = "Results of Normality Test After Log Transformation", 
+                startRow = nrow(results_list[[activity]]$model_anova) + nrow(results_list[[activity]]$model_summary) + nrow(results_list[[activity]]$normality_before) + 10)
+      writeData(wb, sheet = paste0(activity, "_Summary"), 
+                results_list[[activity]]$normality_after, 
+                startRow = nrow(results_list[[activity]]$model_anova) + nrow(results_list[[activity]]$model_summary) + nrow(results_list[[activity]]$normality_before) + 11)
+
+      if (!is.null(results_list[[activity]]$pairwise_results)) {
+        writeData(wb, sheet = paste0(activity, "_Summary"), 
+                  x = "Estimated Marginal Means Pairwise Comparisons", 
+                  startRow = nrow(results_list[[activity]]$model_anova) + nrow(results_list[[activity]]$model_summary) + nrow(results_list[[activity]]$normality_before) + nrow(results_list[[activity]]$normality_after) + 13)
+        writeData(wb, sheet = paste0(activity, "_Summary"), 
+                  results_list[[activity]]$pairwise_results, 
+                  startRow = nrow(results_list[[activity]]$model_anova) + nrow(results_list[[activity]]$model_summary) + nrow(results_list[[activity]]$normality_before) + nrow(results_list[[activity]]$normality_after) + 14)
+      }
+    }
+
+    saveWorkbook(wb, file = paste0(output_excel_base, "_", group_label, ".xlsx"), overwrite = TRUE)
+    cat("\nSummary statistics saved to:", paste0(output_excel_base, "_", group_label, ".xlsx"), "\n")
+  }
+
+  if (separate_by_gender) {
+    for (gender in unique(df$Gender)) {
+      df_gender <- df %>% filter(Gender == gender)
+      process_one_group(df_gender, gender)
+    }
+  } else {
+    process_one_group(df, "All_Subjects")
+  }
+}
+```
+
+
+# plots TW paramaters - Fatigue levels within activities
+```{r}
+
+# --- GENERALIZED VARIABLES -------------------
+# input_file <- "TW_CompletionTimes.csv"
+# y_variable <- "C_Time"
+# plot_title <- "Completion Time (log scale, s)"
+# output_file <- "TW_CompletionTimes.png"
+
+# input_file <- "TW_TorsoRMS.csv"
+# y_variable <- "XYZ_RMS"
+# plot_title <- "Torso RMS Acceleration (log scale, m/s²)"
+# output_file <- "TW_TorsoRMS.png"
+
+# input_file <- "TW_Steps.csv"
+# y_variable <- "Steps"
+# plot_title <- "Correct Steps"
+# output_file <- "Steps.png"
+
+input_file <- "TW_TWP.csv"
+y_variable <- "TWP"
+plot_title <- "TWP"
+output_file <- "TWP.png"
+
+# input_file <- "OW_HOW_Torso_Accelerations.csv"
+# y_variable <- "RMS_XYZ"
+# plot_title <- "Torso RMS (log scale, m/s²)"
+# output_file <- "OW_HOW_TorsoRMSAcceleration.png"
+
+# input_file <- "OW_RMS_Torso_Accelerations_byPhase.csv"
+# y_variable <- "RMS_XYZ"
+# plot_title <- "OW Torso RMS Acceleration (log scale, m/s²)"
+# output_file <- "OW_ByPhase_RMS.png"
+
+# input_file <- "HOW_RMS_Torso_Accelerations_byPhase.csv"
+# y_variable <- "RMS_XYZ"
+# plot_title <- "HOW Torso RMS Acceleration (log scale, m/s²)"
+# output_file <- "HOW_ByPhase_RMS.png"
+
+# ---------------------------------------------
+
+
+# --- TOGGLES & SETTINGS ----------------------
+remove_outliers <- TRUE
+outlier_multiplier <- 1.5
+average_trials <- TRUE
+use_log_scale <- TRUE       # Toggle log scale ON/OFF
+separate_by_gender <- FALSE  # Toggle gender-separated plots ON/OFF
+
+
+
+# --- VISUAL SETTINGS -------------------------
+individual_line_size <- 0.2
+individual_point_size <- 2
+individual_alpha <- 0.6
+group_line_size <- 1.25
+group_alpha <- 1.0
+color_G <- "#FC8D62"
+color_NG <- "#66C2A5"
+
+
+# --- Load Data ---
+input_path <- file.path(input_folder, input_file)
+data_df <- read.csv(input_path, header = TRUE)
+data_df$Value <- data_df[[y_variable]]
+
+# Assign gender based on Subject
+data_df$Gender <- ifelse(data_df$Subject %in% male_subjects, "Male",
+                         ifelse(data_df$Subject %in% female_subjects, "Female", NA))
+
+# Define activity labels and factor levels
+activity_labels <- c(
+  TWEO = "Tandem Walk Eyes Open",
+  TWEC = "Tandem Walk Eyes Closed",
+  TWDT = "Tandem Walk Dual Task"
+)
+
+# activity_labels <- c(
+#   OW = "Obstacle Walk",
+#   HOW = "Hidden Obstacle Walk"
+# )
+
+# activity_labels <- c(
+#   WalkToObstacle = "Start_to_Turn",
+#   Turning = "Turning",
+#   ObstacleCross = "Obstcle_Crossing",
+#   FinalPhase = "Obstcle_to_end",
+#   PostTurnToEnd = "Turn_to_End"
+# )
+
+data_df$Activity <- factor(data_df$Activity, levels = names(activity_labels))
+#data_df$Fatigue <- factor(data_df$Fatigue, levels = fatigue_levels)
+data_df$Fatigue <- factor(data_df$Fatigue,
+                          levels = c("pr","po"),
+                          labels = c("Pre","Post"))
+
+
+# --- Outlier Removal ---
+if (remove_outliers) {
+  data_df <- data_df %>%
+    group_by(Activity, Fatigue, Stimulation) %>%
+    mutate(
+      Q1 = quantile(Value, 0.25, na.rm = TRUE),
+      Q3 = quantile(Value, 0.75, na.rm = TRUE),
+      IQR = Q3 - Q1,
+      Lower = Q1 - outlier_multiplier * IQR,
+      Upper = Q3 + outlier_multiplier * IQR,
+      IsOutlier = Value < Lower | Value > Upper
+    ) %>%
+    ungroup()
+
+  removed_rows <- data_df %>% filter(IsOutlier)
+  if (nrow(removed_rows) > 0) {
+    cat("\n--- REMOVED OUTLIER ROWS ---\n")
+    print(removed_rows[, c("Subject", "Activity", "Fatigue", "Stimulation", "Trial", y_variable)])
+  } else {
+    cat("\nNo outliers detected.\n")
+  }
+
+  data_df <- data_df %>% filter(!IsOutlier)
+}
+
+# --- Trial Averaging ---
+if (average_trials) {
+  plot_df <- data_df %>%
+    group_by(Subject, Gender, Activity, Fatigue, Stimulation) %>%
+    summarize(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+} else {
+  plot_df <- data_df
+}
+
+# --- Group Mean for Aggregated Line ---
+group_mean_df <- plot_df %>%
+  group_by(Gender, Activity, Fatigue, Stimulation) %>%
+  summarize(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+
+# --- Plot Function by Gender ---
+plot_by_gender <- function(gender_filter) {
+  df <- plot_df %>% filter(Gender == gender_filter)
+  mean_df <- group_mean_df %>% filter(Gender == gender_filter)
+
+  p <- ggplot(df, aes(x = Fatigue, y = Value, color = Stimulation)) +
+    geom_point(position = position_jitter(width = 0.15),
+               size = individual_point_size, alpha = individual_alpha) +
+    {
+      if (average_trials) {
+        geom_line(aes(group = interaction(Subject, Stimulation)),
+                  size = individual_line_size, alpha = individual_alpha)
+      } else {
+        geom_line(aes(group = interaction(Subject, Trial, Stimulation)),
+                  size = individual_line_size, alpha = individual_alpha)
+      }
+    } +
+    geom_line(data = mean_df,
+              aes(group = Stimulation),
+              size = group_line_size, alpha = group_alpha) +
+    scale_color_manual(values = c("NG" = color_NG, "G" = color_G)) +
+    labs(
+      title = paste0(plot_title, " - ", gender_filter),
+      x = "Time Point",
+      y = plot_title,
+      color = "Stimulation"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "right",
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA),
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold")
+    ) +
+    facet_wrap(~ Activity, labeller = labeller(Activity = activity_labels), nrow = 1)
+
+  if (use_log_scale) {
+    p <- p + scale_y_log10()
+  }
+
+  return(p)
+}
+
+# --- Generate and Save Plots ---
+if (separate_by_gender) {
+  base_name <- file_path_sans_ext(output_file)
+
+  p_male <- plot_by_gender("Male")
+  p_female <- plot_by_gender("Female")
+
+  print(p_male)
+  ggsave(paste0(Fatigue_type, "_", base_name, "_Male.png"), plot = p_male, width = 12, height = 6, dpi = 300, bg = "white")
+
+  print(p_female)
+  ggsave(paste0(Fatigue_type, "_", base_name, "_Female.png"), plot = p_female, width = 12, height = 6, dpi = 300, bg = "white")
+
+} else {
+  group_mean_df_all <- plot_df %>%
+    group_by(Activity, Fatigue, Stimulation) %>%
+    summarize(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+
+  p_all <- ggplot(plot_df, aes(x = Fatigue, y = Value, color = Stimulation)) +
+    geom_point(position = position_jitter(width = 0.15),
+               size = individual_point_size, alpha = individual_alpha) +
+    {
+      if (average_trials) {
+        geom_line(aes(group = interaction(Subject, Stimulation)),
+                  size = individual_line_size, alpha = individual_alpha)
+      } else {
+        geom_line(aes(group = interaction(Subject, Trial, Stimulation)),
+                  size = individual_line_size, alpha = individual_alpha)
+      }
+    } +
+    geom_line(data = group_mean_df_all,
+              aes(group = Stimulation),
+              size = group_line_size, alpha = group_alpha) +
+    scale_color_manual(values = c("NG" = color_NG, "G" = color_G)) +
+    labs(
+      title = paste0(plot_title, " - All Subjects"),
+      x = "Fatigue Time Point",
+      y = plot_title,
+      color = "Stimulation"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "right",
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA),
+      
+       # Axis text (tick labels)
+      axis.text.x = element_text(size = 15),
+      axis.text.y = element_text(size = 15),
+      
+        # Axis titles
+      axis.title.x = element_text(size = 15, face = "bold"),
+      axis.title.y = element_text(size = 15, face = "bold"),
+      
+        # Facet strips
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold", size = 14),
+      
+        # Plot title
+       plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+      
+      # Legend text (optional)
+      legend.title = element_text(size = 14, face = "bold"),
+      legend.text  = element_text(size = 13)
+
+    ) +
+    facet_wrap(~ Activity, labeller = labeller(Activity = activity_labels), nrow = 1)
+
+  if (use_log_scale) {
+    p_all <- p_all + scale_y_log10()
+  }
+
+  print(p_all)
+  ggsave(paste0(Fatigue_type, "_", output_file), plot = p_all, width = 12, height = 6, , dpi = 300,  bg = "white")
+}
+
+
+# --- Run Statistical Analysis and Save Results ---
+
+run_fatigue_gvs_analysis(
+  df = plot_df,
+  apply_log_transform = TRUE,
+  use_glmm = FALSE,
+  separate_by_gender,
+  package_choice = "lmerTest", # lmerTest or afex
+  output_excel_base = paste0(Fatigue_type, "_", file_path_sans_ext(output_file), "_Stats")
+)
+
+
+```
+
